@@ -1,0 +1,411 @@
+{
+  "info": {
+    "name": "Chunking PDF — Local API",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "description": "Collection theo routes hiện tại của project. Gồm 10 API chính và 4 endpoint tài liệu mặc định của FastAPI.\n\nCách dùng:\n1. Import file này vào Postman. Variables: base_url mặc định http://127.0.0.1:8000 (không thêm dấu / cuối); nhập email và password của bạn (6–128 ký tự). display_name tùy chọn.\n2. Chạy Register nếu chưa có tài khoản, rồi Login. Login tự lưu access_token tại Collection Variables; các API bảo vệ kế thừa Bearer auth.\n3. Upload PDF: Body → form-data → file → chọn đúng một PDF. Không tự thêm Content-Type header; Postman tạo multipart boundary. MIME của file phải là application/pdf.\n4. Upload thành công tự lưu document_id, reset offset=0. Gọi Get document status với khoảng nghỉ tăng dần. Chạy worker riêng; khi status=completed mới gọi Get chunks.\n5. Get chunks: limit 1–100 (mặc định 20), offset >=0. Đặt offset bằng data.next_offset để đọc trang tiếp; null nghĩa là hết. Collection không tự polling hoặc tự tăng offset.\n6. Retry chỉ khi lỗi có thể thử lại và nguồn còn tồn tại; không cần chạy mỗi lần. Logout đặt cuối; thành công xóa token trong collection. JWT phía server vẫn hợp lệ tới hạn; hết hạn cần Login lại.\n\nIdempotency-Key: lần upload đầu tự sinh và lưu nếu biến idempotency_key trống. Gửi lại cùng key/file sẽ lấy lại document cũ. Muốn upload tài liệu mới: xóa giá trị biến idempotency_key để sinh key mới. Cùng key khác nội dung trả 409.\n\nChỉ đặt access_token, document_id và idempotency_key tại Collection Variables; biến cùng tên ở environment/data/local có thể ghi đè. email/password mặc định trống, không chứa credentials thật. Không chia sẻ bản export chứa password/token thật.\n\nResponse JSON API có dạng {statusCode, data}; OpenAPI/Swagger/ReDoc dùng định dạng riêng. Upload mới trả 202; replay document completed/failed trả 200. Chunks chưa completed trả 409. Ready có thể trả 503 nếu DB chưa sẵn sàng. Retry nguồn hết hạn trả 410.\n\nDùng từng request theo luồng trên, không Run collection một lượt: worker bất đồng bộ, retry phụ thuộc trạng thái, đăng ký lại có thể trả 409. Hướng dẫn chạy API/worker: documents/run-project.md."
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{access_token}}",
+        "type": "string"
+      }
+    ]
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://127.0.0.1:8000",
+      "type": "string",
+      "description": "URL API, không có dấu / cuối."
+    },
+    {
+      "key": "email",
+      "value": "",
+      "type": "string",
+      "description": "Nhập email tài khoản trước khi Register/Login."
+    },
+    {
+      "key": "password",
+      "value": "",
+      "type": "string",
+      "description": "Nhập mật khẩu 6–128 ký tự. Không chia sẻ giá trị thật."
+    },
+    {
+      "key": "display_name",
+      "value": "Postman User",
+      "type": "string",
+      "description": "Tên hiển thị, tối đa 200 ký tự."
+    },
+    {
+      "key": "access_token",
+      "value": "",
+      "type": "string",
+      "description": "Login tự lưu; Logout thành công xóa. Chỉ dùng Collection Variables."
+    },
+    {
+      "key": "document_id",
+      "value": "",
+      "type": "string",
+      "description": "Upload tự lưu UUID; có thể đặt UUID tài liệu thuộc tài khoản hiện tại."
+    },
+    {
+      "key": "idempotency_key",
+      "value": "",
+      "type": "string",
+      "description": "Upload tự sinh nếu trống. Giữ để replay; xóa để upload mới."
+    },
+    {
+      "key": "limit",
+      "value": "20",
+      "type": "string",
+      "description": "Số chunks mỗi trang: 1–100."
+    },
+    {
+      "key": "offset",
+      "value": "0",
+      "type": "string",
+      "description": "Vị trí bắt đầu >=0; dùng data.next_offset để đọc trang tiếp."
+    }
+  ],
+  "item": [
+    {
+      "name": "01 — Health",
+      "item": [
+        {
+          "name": "Liveness",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{base_url}}/health/live",
+            "description": "Public. 200: data.status=ok; không kiểm tra DB.",
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Readiness",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{base_url}}/health/ready",
+            "description": "Public. 200: ready; 503: unavailable. Chỉ kiểm tra kết nối DB.",
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "02 — Auth",
+      "item": [
+        {
+          "name": "Register",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/api/v1/auth/register",
+            "description": "Public. 201 tạo user; 409 nếu email đã tồn tại. Không tự đăng nhập. display_name có thể bỏ hoặc null.",
+            "auth": {
+              "type": "noauth"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{email}}\",\n  \"password\": \"{{password}}\",\n  \"display_name\": \"{{display_name}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Login",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/api/v1/auth/login",
+            "description": "Public. 200 trả data.access_token, token_type, expires_in. Tự lưu token cho các request sau.",
+            "auth": {
+              "type": "noauth"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{email}}\",\n  \"password\": \"{{password}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Login thành công\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "if (pm.response.code === 200) {",
+                  "    const data = pm.response.json().data;",
+                  "    pm.test(\"Có access_token\", function () {",
+                  "        pm.expect(data.access_token).to.be.a(\"string\").and.not.empty;",
+                  "    });",
+                  "    if (typeof data.access_token === \"string\" && data.access_token) {",
+                  "        pm.collectionVariables.set(\"access_token\", data.access_token);",
+                  "    }",
+                  "}"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "03 — Users",
+      "item": [
+        {
+          "name": "Current user",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{base_url}}/api/v1/users/me",
+            "description": "Bearer. 200 trả id, display_name, email, created_at của user hiện tại."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "04 — Documents",
+      "item": [
+        {
+          "name": "Upload PDF",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Idempotency-Key",
+                "value": "{{idempotency_key}}",
+                "description": "1–200 ký tự ASCII hiển thị, không khoảng trắng."
+              }
+            ],
+            "url": "{{base_url}}/api/v1/documents/upload",
+            "description": "Bearer. Chọn PDF tại Body → file. 202 tiếp nhận; replay có thể trả 200. Tự lưu document_id. Xóa idempotency_key trong Collection Variables khi muốn upload tài liệu mới.",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": [],
+                  "contentType": "application/pdf",
+                  "description": "Chọn một file PDF trên máy."
+                }
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (!pm.collectionVariables.get(\"idempotency_key\")) {",
+                  "    pm.collectionVariables.set(\"idempotency_key\", pm.variables.replaceIn(\"{{$guid}}\"));",
+                  "}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Upload được tiếp nhận hoặc replay\", function () {",
+                  "    pm.expect(pm.response.code).to.be.oneOf([200, 202]);",
+                  "});",
+                  "if (pm.response.code === 200 || pm.response.code === 202) {",
+                  "    const data = pm.response.json().data;",
+                  "    pm.test(\"Có document_id\", function () {",
+                  "        pm.expect(data.document_id).to.be.a(\"string\").and.not.empty;",
+                  "    });",
+                  "    if (typeof data.document_id === \"string\" && data.document_id) {",
+                  "        pm.collectionVariables.set(\"document_id\", data.document_id);",
+                  "        pm.collectionVariables.set(\"offset\", \"0\");",
+                  "    }",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get document status",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{base_url}}/api/v1/documents/{{document_id}}",
+            "description": "Bearer. 200 trả status, stage, page_count, chunk_count, warnings, quality_summary, processing_error, retryable, source_available. 404 nếu không tồn tại/không thuộc user."
+          },
+          "response": []
+        },
+        {
+          "name": "Get chunks",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/documents/{{document_id}}/chunks?limit={{limit}}&offset={{offset}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "documents",
+                "{{document_id}}",
+                "chunks"
+              ],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "{{limit}}",
+                  "description": "1–100; mặc định 20."
+                },
+                {
+                  "key": "offset",
+                  "value": "{{offset}}",
+                  "description": ">=0; mặc định 0."
+                }
+              ]
+            },
+            "description": "Bearer. Chỉ completed mới trả 200, còn lại 409. data gồm chunks, total, limit, offset, next_offset. Đặt offset=data.next_offset để đọc tiếp; null là hết."
+          },
+          "response": []
+        },
+        {
+          "name": "Retry document",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{base_url}}/api/v1/documents/{{document_id}}/retry",
+            "description": "Bearer, không body. 202: requeue hoặc đang queued/processing. 409: completed/không retry được. 410: nguồn hết hạn. 429: vượt rate limit. Giữ document_id hiện tại."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "05 — Logout",
+      "item": [
+        {
+          "name": "Logout",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{base_url}}/api/v1/auth/logout",
+            "description": "Bearer, không body. 200 xác nhận logout; script xóa token tại collection. Server không thu hồi JWT đã cấp."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Logout thành công\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "if (pm.response.code === 200) {",
+                  "    pm.collectionVariables.set(\"access_token\", \"\");",
+                  "}"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "06 — API documentation",
+      "item": [
+        {
+          "name": "OpenAPI JSON",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{base_url}}/openapi.json",
+            "description": "Public. Đặc tả OpenAPI, không dùng envelope statusCode/data.",
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Swagger UI",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{base_url}}/docs",
+            "description": "Public. HTML Swagger UI; mở URL bằng trình duyệt để tương tác.",
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "ReDoc",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{base_url}}/redoc",
+            "description": "Public. HTML ReDoc; mở URL bằng trình duyệt để đọc.",
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Swagger OAuth2 redirect",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{base_url}}/docs/oauth2-redirect",
+            "description": "Public. HTML callback mặc định FastAPI; endpoint phụ trợ Swagger, không phải API đăng nhập của project.",
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "response": []
+        }
+      ]
+    }
+  ]
+}

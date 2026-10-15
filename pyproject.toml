@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "chunking-pdf"
+version = "0.1.0"
+description = "Asynchronous PDF processing and adaptive chunking service"
+readme = "README.md"
+requires-python = ">=3.12,<3.15"
+dependencies = [
+    "fastapi>=0.115,<1",
+    "uvicorn>=0.34,<1",
+    "pydantic>=2.9,<3",
+    "pydantic-settings>=2.8,<3",
+    "sqlalchemy[asyncio]>=2.0,<2.1",
+    "asyncpg>=0.31,<1",
+    "alembic>=1.15,<2",
+    "python-multipart>=0.0.20,<1",
+    "langchain-core>=1,<2",
+    "langchain-text-splitters>=1,<2",
+    "pypdf>=6,<7",
+    "pypdfium2>=4.30,<6",
+    "Pillow>=11,<13",
+    "tiktoken>=0.9,<1",
+    "psutil>=7,<8",
+    "PyJWT>=2.10,<3",
+    "argon2-cffi>=25,<26",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<10", "pytest-asyncio>=1,<2", "httpx>=0.28,<1", "ruff>=0.11,<1"]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
